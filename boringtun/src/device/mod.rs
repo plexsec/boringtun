@@ -574,6 +574,8 @@ impl Device {
                         }
                         TunnResult::Err(e) => tracing::error!(message = "Timer error", error = ?e),
                         TunnResult::WriteToNetwork(packet) => {
+                            simple_encrypt_packet(packet);
+
                             match endpoint_addr {
                                 SocketAddr::V4(_) => {
                                     udp4.send_to(packet, &endpoint_addr.into()).ok()
@@ -625,7 +627,9 @@ impl Device {
                 let src_buf =
                     unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
                 while let Ok((packet_len, addr)) = udp.recv_from(src_buf) {
-                    let packet = &t.src_buf[..packet_len];
+                    let packet = &mut t.src_buf[..packet_len];
+                    simple_decrypt_packet(packet);
+
                     // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
                     let parsed_packet = match rate_limiter.verify_packet(
                         Some(addr.as_socket().unwrap().ip()),
@@ -634,6 +638,7 @@ impl Device {
                     ) {
                         Ok(packet) => packet,
                         Err(TunnResult::WriteToNetwork(cookie)) => {
+                            simple_encrypt_packet(cookie);
                             let _: Result<_, _> = udp.send_to(cookie, &addr);
                             continue;
                         }
@@ -670,6 +675,7 @@ impl Device {
                         TunnResult::Err(_) => continue,
                         TunnResult::WriteToNetwork(packet) => {
                             flush = true;
+                            simple_encrypt_packet(packet);
                             let _: Result<_, _> = udp.send_to(packet, &addr);
                         }
                         TunnResult::WriteToTunnelV4(packet, addr) => {
@@ -689,6 +695,7 @@ impl Device {
                         while let TunnResult::WriteToNetwork(packet) =
                             p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
                         {
+                            simple_encrypt_packet(packet);
                             let _: Result<_, _> = udp.send_to(packet, &addr);
                         }
                     }
@@ -835,8 +842,10 @@ impl Device {
                                 // Prefer to send using the connected socket
                                 let _: Result<_, _> = conn.write(packet);
                             } else if let Some(addr @ SocketAddr::V4(_)) = endpoint.addr {
+                                simple_encrypt_packet(packet);
                                 let _: Result<_, _> = udp4.send_to(packet, &addr.into());
                             } else if let Some(addr @ SocketAddr::V6(_)) = endpoint.addr {
+                                simple_encrypt_packet(packet);
                                 let _: Result<_, _> = udp6.send_to(packet, &addr.into());
                             } else {
                                 tracing::error!("No endpoint");
@@ -899,4 +908,12 @@ impl Default for IndexLfsr {
             mask: Self::random_index(),
         }
     }
+}
+
+fn simple_encrypt_packet(packet: &mut [u8]) {
+    packet.iter_mut().for_each(|byte| *byte = *byte ^ 43);
+}
+
+fn simple_decrypt_packet(packet: &mut [u8]) {
+    packet.iter_mut().for_each(|byte| *byte = *byte ^ 43);
 }
